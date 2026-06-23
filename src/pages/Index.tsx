@@ -3,7 +3,7 @@ import Icon from '@/components/ui/icon';
 import {
   COLS, ROWS, Stack, Faction, makeInitialStacks, rollInitiative,
   computeDamage, applyDamage, heroAttack, HEROES, Hero,
-  getMoveCells, getAttackCells,
+  getMoveCells, getAttackCells, isRangedBlocked,
 } from '@/game/battle';
 
 const FACTION_LABEL: Record<Faction, string> = { haven: 'Хэйвен', necro: 'Некрополис' };
@@ -74,6 +74,11 @@ const Index = () => {
     setHeroMode(false);
   }, [order, turnIdx, round, addLog]);
 
+  const blockedRangedUids = useMemo(() =>
+    new Set(stacks.filter((s) => s.count > 0 && isRangedBlocked(s, stacks)).map((s) => s.uid)),
+    [stacks]
+  );
+
   const moveCells = useMemo(() => {
     if (!activeStack || phase !== 'move' || heroMode) return new Set<string>();
     return getMoveCells(activeStack, stacks);
@@ -87,12 +92,21 @@ const Index = () => {
   const doAttack = useCallback((attackerStack: Stack, targetUid: string, currentStacks: Stack[]) => {
     const target = currentStacks.find((s) => s.uid === targetUid);
     if (!target) return;
-    const res = computeDamage(attackerStack, target);
+
+    if (attackerStack.type.ranged && isRangedBlocked(attackerStack, currentStacks)) {
+      addLog(`🚫 ${attackerStack.type.name} заблокирован в ближнем бою — не может стрелять!`, 'system');
+      advanceTurn(currentStacks);
+      return;
+    }
+
+    const res = computeDamage(attackerStack, target, currentStacks);
     const updated = currentStacks.map((s) => s.uid === targetUid ? applyDamage(s, res.total) : s);
     setShakeUid(targetUid);
     setTimeout(() => setShakeUid(null), 350);
+
+    const penaltyNote = res.meleePenalty ? ' ⚔️→🏹 −25%' : '';
     addLog(
-      `${attackerStack.type.name} бьёт ${target.type.name}: ${res.total} урона (×${res.multiplier})${res.killed > 0 ? `, убито ${res.killed}` : ''}`,
+      `${attackerStack.type.name} бьёт ${target.type.name}: ${res.total} урона (×${res.multiplier})${penaltyNote}${res.killed > 0 ? `, убито ${res.killed}` : ''}`,
       attackerStack.side
     );
     setStacks(updated);
@@ -202,6 +216,7 @@ const Index = () => {
               activeUid={activeStack?.uid ?? null}
               moveCells={moveCells}
               attackCells={attackCells}
+              blockedRangedUids={blockedRangedUids}
               heroMode={heroMode}
               phase={phase}
               shakeUid={shakeUid}
@@ -282,12 +297,13 @@ const ScoreBar = ({ haven, necro, round }: { haven: number; necro: number; round
 );
 
 const Battlefield = ({
-  stacks, activeUid, moveCells, attackCells, heroMode, phase, shakeUid, onCellClick,
+  stacks, activeUid, moveCells, attackCells, blockedRangedUids, heroMode, phase, shakeUid, onCellClick,
 }: {
   stacks: Stack[];
   activeUid: string | null;
   moveCells: Set<string>;
   attackCells: Set<string>;
+  blockedRangedUids: Set<string>;
   heroMode: boolean;
   phase: Phase;
   shakeUid: string | null;
@@ -350,6 +366,9 @@ const Battlefield = ({
                     {stack.defending && (
                       <Icon name="Shield" size={9} className="absolute top-0 left-0 text-gold opacity-80" />
                     )}
+                    {blockedRangedUids.has(stack.uid) && (
+                      <Icon name="Lock" size={9} className="absolute top-0 right-0 text-orange-400 opacity-90" />
+                    )}
                     {isActive && phase === 'select' && (
                       <span className="absolute -top-1 -right-1 text-[8px] bg-gold text-primary-foreground rounded px-0.5 leading-3 py-0.5">
                         ▶
@@ -366,6 +385,7 @@ const Battlefield = ({
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-blue-500/40 inline-block border border-blue-400/60" /> ход</span>
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-red-600/40 inline-block border border-red-400/70" /> атака</span>
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-gold/30 inline-block border border-gold/60" /> удар героя</span>
+        <span className="flex items-center gap-1"><Icon name="Lock" size={10} className="text-orange-400" /> стрелок заблокирован</span>
       </div>
     </div>
   );

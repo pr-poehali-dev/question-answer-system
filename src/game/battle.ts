@@ -80,14 +80,41 @@ export interface DamageResult {
   multiplier: number;
 }
 
-export function computeDamage(attacker: Stack, target: Stack): DamageResult {
+export function isRangedBlocked(stack: Stack, allStacks: Stack[]): boolean {
+  if (!stack.type.ranged) return false;
+  return allStacks.some(
+    (s) =>
+      s.side !== stack.side &&
+      s.count > 0 &&
+      !s.type.ranged &&
+      Math.abs(s.x - stack.x) + Math.abs(s.y - stack.y) === 1
+  );
+}
+
+export interface DamageResult {
+  total: number;
+  killed: number;
+  multiplier: number;
+  blocked?: boolean;
+  meleePenalty?: boolean;
+}
+
+export function computeDamage(attacker: Stack, target: Stack, allStacks: Stack[]): DamageResult {
   const t = attacker.type;
   const tgtDef = target.type.def + (target.defending ? 2 : 0);
+
+  if (t.ranged && isRangedBlocked(attacker, allStacks)) {
+    return { total: 0, killed: 0, multiplier: 0, blocked: true };
+  }
+
   let mult = 1 + (t.atk - tgtDef) / 20;
   if (mult < 0.5) mult = 0.5;
 
   let rangePenalty = 1;
   if (t.ranged && distance(attacker, target) > 5) rangePenalty = 0.5;
+
+  const meleePenalty = !t.ranged && target.type.ranged && isAdjacentTo(attacker, target);
+  if (meleePenalty) mult *= 0.75;
 
   const raw = attacker.count * avgDice(t.dice) * mult * rangePenalty;
   const total = Math.max(1, Math.round(raw));
@@ -96,7 +123,16 @@ export function computeDamage(attacker: Stack, target: Stack): DamageResult {
   const remaining = totalTargetHp - total;
   const killed = target.count - Math.max(0, Math.ceil(remaining / target.type.hp));
 
-  return { total, killed: Math.min(killed, target.count), multiplier: Math.round(mult * rangePenalty * 100) / 100 };
+  return {
+    total,
+    killed: Math.min(killed, target.count),
+    multiplier: Math.round(mult * rangePenalty * 100) / 100,
+    meleePenalty,
+  };
+}
+
+export function isAdjacentTo(a: Stack, b: Stack): boolean {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1;
 }
 
 export function applyDamage(target: Stack, dmg: number): Stack {
