@@ -2,26 +2,28 @@ import { useState, useMemo, useCallback } from 'react';
 import Icon from '@/components/ui/icon';
 import {
   COLS, ROWS, Stack, Faction, makeInitialStacks, rollInitiative,
-  computeDamage, applyDamage, distance, heroAttack, HEROES, Hero,
+  computeDamage, applyDamage, heroAttack, HEROES, Hero,
+  getMoveCells, getAttackCells,
 } from '@/game/battle';
 
 const FACTION_LABEL: Record<Faction, string> = { haven: 'Хэйвен', necro: 'Некрополис' };
-const FACTION_COLOR: Record<Faction, string> = { haven: 'haven', necro: 'necro' };
 
 interface LogEntry { text: string; tone: 'haven' | 'necro' | 'system' }
+
+type Phase = 'select' | 'move';
 
 const Index = () => {
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [order, setOrder] = useState<Stack[]>([]);
   const [turnIdx, setTurnIdx] = useState(0);
   const [round, setRound] = useState(1);
-  const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
   const [heroes, setHeroes] = useState<Record<Faction, Hero>>(HEROES);
   const [heroMode, setHeroMode] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [started, setStarted] = useState(false);
   const [winner, setWinner] = useState<Faction | null>(null);
   const [shakeUid, setShakeUid] = useState<string | null>(null);
+  const [phase, setPhase] = useState<Phase>('select');
 
   const addLog = useCallback((text: string, tone: LogEntry['tone']) => {
     setLog((l) => [{ text, tone }, ...l].slice(0, 40));
@@ -29,36 +31,34 @@ const Index = () => {
 
   const startBattle = () => {
     const init = makeInitialStacks();
-    setStacks(init);
     const ord = rollInitiative(init);
-    setOrder(ord);
     setStacks(ord);
+    setOrder(ord);
     setTurnIdx(0);
     setRound(1);
     setHeroes(HEROES);
     setStarted(true);
     setWinner(null);
-    setSelectedTarget(null);
     setHeroMode(false);
+    setPhase('select');
     setLog([{ text: 'Битва началась! Брошена инициатива.', tone: 'system' }]);
   };
 
-  const active = order[turnIdx];
+  const activeOrder = order[turnIdx];
   const activeStack = useMemo(
-    () => stacks.find((s) => s.uid === active?.uid && s.count > 0),
-    [stacks, active]
+    () => stacks.find((s) => s.uid === activeOrder?.uid && s.count > 0),
+    [stacks, activeOrder]
   );
 
   const checkWin = useCallback((next: Stack[]) => {
-    const havenAlive = next.some((s) => s.side === 'haven' && s.count > 0);
-    const necroAlive = next.some((s) => s.side === 'necro' && s.count > 0);
-    if (!havenAlive) { setWinner('necro'); addLog('Некрополис побеждает! Хэйвен пал.', 'necro'); return true; }
-    if (!necroAlive) { setWinner('haven'); addLog('Хэйвен побеждает! Нежить рассеяна.', 'haven'); return true; }
+    const hAlive = next.some((s) => s.side === 'haven' && s.count > 0);
+    const nAlive = next.some((s) => s.side === 'necro' && s.count > 0);
+    if (!hAlive) { setWinner('necro'); addLog('Некрополис побеждает! Хэйвен пал.', 'necro'); return true; }
+    if (!nAlive) { setWinner('haven'); addLog('Хэйвен побеждает! Нежить рассеяна.', 'haven'); return true; }
     return false;
   }, [addLog]);
 
   const advanceTurn = useCallback((current: Stack[]) => {
-    const alive = order.filter((o) => current.find((s) => s.uid === o.uid && s.count > 0));
     let next = turnIdx + 1;
     while (next < order.length && !current.find((s) => s.uid === order[next].uid && s.count > 0)) next++;
     if (next >= order.length) {
@@ -70,36 +70,101 @@ const Index = () => {
     } else {
       setTurnIdx(next);
     }
-    setSelectedTarget(null);
+    setPhase('select');
     setHeroMode(false);
-    void alive;
   }, [order, turnIdx, round, addLog]);
 
-  const enemyTargets = useMemo(() => {
-    if (!activeStack) return [];
-    return stacks.filter((s) => s.side !== activeStack.side && s.count > 0);
-  }, [stacks, activeStack]);
+  const moveCells = useMemo(() => {
+    if (!activeStack || phase !== 'move' || heroMode) return new Set<string>();
+    return getMoveCells(activeStack, stacks);
+  }, [activeStack, stacks, phase, heroMode]);
 
-  const performAttack = (targetUid: string) => {
-    if (!activeStack) return;
-    const target = stacks.find((s) => s.uid === targetUid);
+  const attackCells = useMemo(() => {
+    if (!activeStack || phase !== 'move' || heroMode) return new Set<string>();
+    return getAttackCells(activeStack, stacks);
+  }, [activeStack, stacks, phase, heroMode]);
+
+  const doAttack = useCallback((attackerStack: Stack, targetUid: string, currentStacks: Stack[]) => {
+    const target = currentStacks.find((s) => s.uid === targetUid);
     if (!target) return;
-    if (!activeStack.type.ranged && distance(activeStack, target) > 6) {
-      addLog(`${activeStack.type.name}: цель слишком далеко для ближнего боя`, 'system');
-      return;
-    }
-    const res = computeDamage(activeStack, target);
-    const updated = stacks.map((s) =>
-      s.uid === targetUid ? applyDamage(s, res.total) : s
-    );
+    const res = computeDamage(attackerStack, target);
+    const updated = currentStacks.map((s) => s.uid === targetUid ? applyDamage(s, res.total) : s);
     setShakeUid(targetUid);
-    setTimeout(() => setShakeUid(null), 300);
+    setTimeout(() => setShakeUid(null), 350);
     addLog(
-      `${activeStack.type.name} бьёт ${target.type.name}: ${res.total} урона (×${res.multiplier})${res.killed > 0 ? `, убито ${res.killed}` : ''}`,
-      activeStack.side
+      `${attackerStack.type.name} бьёт ${target.type.name}: ${res.total} урона (×${res.multiplier})${res.killed > 0 ? `, убито ${res.killed}` : ''}`,
+      attackerStack.side
     );
     setStacks(updated);
     if (!checkWin(updated)) advanceTurn(updated);
+  }, [addLog, checkWin, advanceTurn]);
+
+  const handleCellClick = (x: number, y: number) => {
+    if (winner || !activeStack) return;
+
+    const clickedStack = stacks.find((s) => s.x === x && s.y === y && s.count > 0);
+
+    if (heroMode) {
+      if (clickedStack && clickedStack.side !== activeStack.side) {
+        const hero = heroes[activeStack.side];
+        if (hero.mana < 2) { addLog('Недостаточно маны для удара героя', 'system'); return; }
+        const frontX = activeStack.side === 'haven' ? 1 : COLS - 2;
+        const res = heroAttack(hero, clickedStack, frontX);
+        const updated = stacks.map((s) => s.uid === clickedStack.uid ? applyDamage(s, res.total) : s);
+        setShakeUid(clickedStack.uid);
+        setTimeout(() => setShakeUid(null), 350);
+        setHeroes((h) => ({ ...h, [activeStack.side]: { ...hero, mana: hero.mana - 2 } }));
+        addLog(`⚡ ${hero.name} атакует ${clickedStack.type.name}: ${res.total} урона (d6=${res.roll})${res.killed > 0 ? `, убито ${res.killed}` : ''}`, activeStack.side);
+        setStacks(updated);
+        if (!checkWin(updated)) advanceTurn(updated);
+      }
+      return;
+    }
+
+    if (phase === 'select') {
+      if (clickedStack?.uid === activeStack.uid) {
+        setPhase('move');
+        addLog(`${activeStack.type.name}: выберите клетку хода или врага`, activeStack.side);
+      }
+      return;
+    }
+
+    if (phase === 'move') {
+      const key = `${x},${y}`;
+
+      if (attackCells.has(key) && clickedStack && clickedStack.side !== activeStack.side) {
+        const enemyAdj = stacks.find((s) => s.x === x && s.y === y && s.side !== activeStack.side && s.count > 0);
+        if (enemyAdj) {
+          if (!activeStack.type.ranged) {
+            const adjToEnemy = [[x+1,y],[x-1,y],[x,y+1],[x,y-1]].find(([nx,ny]) => {
+              const adjKey = `${nx},${ny}`;
+              const occupied = stacks.some((s) => s.uid !== activeStack.uid && s.count > 0 && s.x === nx && s.y === ny);
+              return moveCells.has(adjKey) && !occupied;
+            });
+            const moveTarget = adjToEnemy
+              ? { x: adjToEnemy[0], y: adjToEnemy[1] }
+              : { x: activeStack.x, y: activeStack.y };
+            const movedStack = { ...activeStack, x: moveTarget.x, y: moveTarget.y };
+            const withMove = stacks.map((s) => s.uid === activeStack.uid ? movedStack : s);
+            setStacks(withMove);
+            doAttack(movedStack, enemyAdj.uid, withMove);
+          } else {
+            doAttack(activeStack, enemyAdj.uid, stacks);
+          }
+          return;
+        }
+      }
+
+      if (moveCells.has(key) && !clickedStack) {
+        const updated = stacks.map((s) => s.uid === activeStack.uid ? { ...s, x, y } : s);
+        addLog(`${activeStack.type.name} переходит на (${x+1},${y+1})`, activeStack.side);
+        setStacks(updated);
+        advanceTurn(updated);
+        return;
+      }
+
+      setPhase('select');
+    }
   };
 
   const performDefend = () => {
@@ -108,32 +173,6 @@ const Index = () => {
     addLog(`${activeStack.type.name} встаёт в защиту (+2 защита)`, activeStack.side);
     setStacks(updated);
     advanceTurn(updated);
-  };
-
-  const performHeroAttack = (targetUid: string) => {
-    if (!activeStack) return;
-    const hero = heroes[activeStack.side];
-    if (hero.mana < 2) { addLog('Недостаточно маны для удара героя', 'system'); return; }
-    const target = stacks.find((s) => s.uid === targetUid);
-    if (!target) return;
-    const frontX = activeStack.side === 'haven' ? 1 : COLS - 2;
-    const res = heroAttack(hero, target, frontX);
-    const updated = stacks.map((s) => s.uid === targetUid ? applyDamage(s, res.total) : s);
-    setShakeUid(targetUid);
-    setTimeout(() => setShakeUid(null), 300);
-    setHeroes((h) => ({ ...h, [activeStack.side]: { ...hero, mana: hero.mana - 2 } }));
-    addLog(
-      `⚡ ${hero.name} атакует ${target.type.name}: ${res.total} урона (d6=${res.roll})${res.killed > 0 ? `, убито ${res.killed}` : ''}`,
-      activeStack.side
-    );
-    setStacks(updated);
-    if (!checkWin(updated)) advanceTurn(updated);
-  };
-
-  const handleCellClick = (uid: string) => {
-    if (winner) return;
-    if (heroMode) performHeroAttack(uid);
-    else { setSelectedTarget(uid); performAttack(uid); }
   };
 
   const countAlive = (side: Faction) =>
@@ -161,8 +200,10 @@ const Index = () => {
             <Battlefield
               stacks={stacks}
               activeUid={activeStack?.uid ?? null}
-              enemyUids={enemyTargets.map((e) => e.uid)}
+              moveCells={moveCells}
+              attackCells={attackCells}
               heroMode={heroMode}
+              phase={phase}
               shakeUid={shakeUid}
               onCellClick={handleCellClick}
             />
@@ -172,17 +213,17 @@ const Index = () => {
                 active={activeStack}
                 hero={heroes[activeStack.side]}
                 heroMode={heroMode}
-                onToggleHero={() => setHeroMode((m) => !m)}
+                phase={phase}
+                onToggleHero={() => { setHeroMode((m) => !m); setPhase('move'); }}
                 onDefend={performDefend}
+                onActivate={() => setPhase('move')}
               />
             )}
 
             {winner && (
               <div className="parchment rounded-xl border border-gold/40 p-6 text-center animate-scale-in">
                 <Icon name="Crown" size={40} className="mx-auto text-gold mb-2" />
-                <h2 className="font-display text-2xl text-gold">
-                  Победа: {FACTION_LABEL[winner]}
-                </h2>
+                <h2 className="font-display text-2xl text-gold">Победа: {FACTION_LABEL[winner]}</h2>
                 <button onClick={startBattle}
                   className="mt-4 font-serif px-6 py-2 rounded-lg bg-gold text-primary-foreground hover:brightness-110 transition">
                   Сыграть снова
@@ -207,23 +248,22 @@ const StartScreen = ({ onStart }: { onStart: () => void }) => (
     <p className="font-serif text-muted-foreground leading-relaxed mb-6">
       После Войны Фракций выжившие осели на последнем материке — Драконьей Обители.
       Хрупкое перемирие нарушено. Поведите армию в тактическом бою на сетке 10×8:
-      инициатива, формулы урона, удары героя на дистанции.
+      инициатива, формулы урона, движение по клеткам, удары героя на дистанции.
     </p>
     <div className="grid grid-cols-2 gap-4 mb-8 text-left">
-      <FactionTeaser faction="haven" desc="Щит и вера. Держат линию дольше всех." />
-      <FactionTeaser faction="necro" desc="Смерть — не конец. Армия растёт." />
+      {(['haven', 'necro'] as Faction[]).map((f) => (
+        <div key={f} className={`rounded-xl border border-${f}/40 bg-${f}/10 p-4`}>
+          <h3 className={`font-display text-${f} text-lg`}>{FACTION_LABEL[f]}</h3>
+          <p className="font-sans text-xs text-muted-foreground mt-1">
+            {f === 'haven' ? 'Щит и вера. Держат линию дольше всех.' : 'Смерть — не конец. Армия растёт.'}
+          </p>
+        </div>
+      ))}
     </div>
     <button onClick={onStart}
       className="font-display text-lg px-10 py-3 rounded-xl bg-gold text-primary-foreground font-bold hover:brightness-110 transition animate-glow-pulse">
       Начать битву
     </button>
-  </div>
-);
-
-const FactionTeaser = ({ faction, desc }: { faction: Faction; desc: string }) => (
-  <div className={`rounded-xl border border-${FACTION_COLOR[faction]}/40 bg-${FACTION_COLOR[faction]}/10 p-4`}>
-    <h3 className={`font-display text-${FACTION_COLOR[faction]} text-lg`}>{FACTION_LABEL[faction]}</h3>
-    <p className="font-sans text-xs text-muted-foreground mt-1">{desc}</p>
   </div>
 );
 
@@ -242,10 +282,16 @@ const ScoreBar = ({ haven, necro, round }: { haven: number; necro: number; round
 );
 
 const Battlefield = ({
-  stacks, activeUid, enemyUids, heroMode, shakeUid, onCellClick,
+  stacks, activeUid, moveCells, attackCells, heroMode, phase, shakeUid, onCellClick,
 }: {
-  stacks: Stack[]; activeUid: string | null; enemyUids: string[];
-  heroMode: boolean; shakeUid: string | null; onCellClick: (uid: string) => void;
+  stacks: Stack[];
+  activeUid: string | null;
+  moveCells: Set<string>;
+  attackCells: Set<string>;
+  heroMode: boolean;
+  phase: Phase;
+  shakeUid: string | null;
+  onCellClick: (x: number, y: number) => void;
 }) => {
   const cellMap = new Map<string, Stack>();
   stacks.forEach((s) => { if (s.count > 0) cellMap.set(`${s.x},${s.y}`, s); });
@@ -256,40 +302,58 @@ const Battlefield = ({
         className="grid-cell rounded-lg mx-auto"
         style={{
           display: 'grid',
-          gridTemplateColumns: `repeat(${COLS}, minmax(34px, 1fr))`,
-          gridTemplateRows: `repeat(${ROWS}, minmax(34px, 1fr))`,
-          gap: 2,
-          minWidth: 380,
+          gridTemplateColumns: `repeat(${COLS}, minmax(40px, 1fr))`,
+          gridTemplateRows: `repeat(${ROWS}, minmax(40px, 1fr))`,
+          gap: 3,
+          minWidth: 420,
         }}
       >
         {Array.from({ length: ROWS }).map((_, y) =>
           Array.from({ length: COLS }).map((_, x) => {
-            const stack = cellMap.get(`${x},${y}`);
+            const key = `${x},${y}`;
+            const stack = cellMap.get(key);
             const isActive = stack?.uid === activeUid;
-            const isTargetable = stack && enemyUids.includes(stack.uid);
+            const isMove = moveCells.has(key) && !stack;
+            const isAttack = attackCells.has(key) && stack;
+            const isHeroTarget = heroMode && phase === 'move' && stack && stack.uid !== activeUid && stack.side !== stacks.find(s => s.uid === activeUid)?.side;
             const color = stack?.side === 'haven' ? 'haven' : 'necro';
+
+            let bgClass = 'bg-transparent border border-white/5 hover:border-white/15';
+            if (isMove) bgClass = 'bg-blue-500/20 border border-blue-400/60 hover:bg-blue-500/35 cursor-pointer';
+            if (isAttack) bgClass = `bg-red-600/25 border border-red-400/70 hover:bg-red-600/40 cursor-pointer`;
+            if (isHeroTarget) bgClass = `bg-${color}/20 border border-gold/60 hover:bg-gold/20 cursor-pointer`;
+            if (isActive) bgClass = `bg-${color}/20 border-2 border-gold animate-glow-pulse cursor-pointer`;
+            if (stack && !isActive && !isAttack && !isHeroTarget)
+              bgClass = `bg-${color}/12 border border-${color}/30 cursor-pointer`;
+
             return (
               <button
-                key={`${x},${y}`}
-                disabled={!stack || !isTargetable}
-                onClick={() => stack && onCellClick(stack.uid)}
+                key={key}
+                onClick={() => onCellClick(x, y)}
                 className={[
-                  'relative aspect-square rounded-md flex flex-col items-center justify-center transition-all',
-                  stack ? `bg-${color}/15 border` : 'border border-transparent',
-                  stack ? `border-${color}/40` : '',
-                  isActive ? 'ring-2 ring-gold animate-glow-pulse scale-105 z-10' : '',
-                  isTargetable ? `cursor-pointer hover:bg-${color}/30 ${heroMode ? 'ring-1 ring-gold/60' : ''}` : '',
+                  'relative aspect-square rounded-md flex flex-col items-center justify-center transition-all duration-150 select-none',
+                  bgClass,
                   shakeUid === stack?.uid ? 'animate-hit-shake' : '',
                 ].join(' ')}
               >
+                {isMove && (
+                  <span className="text-blue-300/70 text-base">·</span>
+                )}
                 {stack && (
                   <>
-                    <span className="text-lg md:text-xl leading-none select-none">{stack.type.icon}</span>
-                    <span className={`absolute -bottom-1 -right-1 text-[10px] font-bold px-1 rounded bg-${color} text-background min-w-[16px] text-center`}>
+                    <span className="text-xl leading-none">{stack.type.icon}</span>
+                    <span className={`absolute -bottom-1 -right-1 text-[10px] font-bold px-1 rounded-sm
+                      ${stack.side === 'haven' ? 'bg-haven text-background' : 'bg-necro text-background'}
+                      min-w-[16px] text-center leading-4`}>
                       {stack.count}
                     </span>
                     {stack.defending && (
-                      <Icon name="Shield" size={10} className="absolute top-0 left-0 text-gold" />
+                      <Icon name="Shield" size={9} className="absolute top-0 left-0 text-gold opacity-80" />
+                    )}
+                    {isActive && phase === 'select' && (
+                      <span className="absolute -top-1 -right-1 text-[8px] bg-gold text-primary-foreground rounded px-0.5 leading-3 py-0.5">
+                        ▶
+                      </span>
                     )}
                   </>
                 )}
@@ -298,17 +362,28 @@ const Battlefield = ({
           })
         )}
       </div>
+      <div className="flex gap-4 mt-2 px-1 text-[11px] text-muted-foreground font-sans">
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-blue-500/40 inline-block border border-blue-400/60" /> ход</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-red-600/40 inline-block border border-red-400/70" /> атака</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-gold/30 inline-block border border-gold/60" /> удар героя</span>
+      </div>
     </div>
   );
 };
 
 const ActionPanel = ({
-  active, hero, heroMode, onToggleHero, onDefend,
+  active, hero, heroMode, phase, onToggleHero, onDefend, onActivate,
 }: {
-  active: Stack; hero: Hero; heroMode: boolean;
-  onToggleHero: () => void; onDefend: () => void;
+  active: Stack; hero: Hero; heroMode: boolean; phase: Phase;
+  onToggleHero: () => void; onDefend: () => void; onActivate: () => void;
 }) => {
   const color = active.side === 'haven' ? 'haven' : 'necro';
+  const hint =
+    heroMode ? 'Режим героя: кликните вражеский отряд (−2 маны)'
+    : phase === 'select' ? `Кликните на ${active.type.icon} ${active.type.name}, чтобы начать ход`
+    : active.type.ranged ? 'Кликните по врагу (🔴) для стрельбы, или по синей клетке для перехода'
+    : 'Кликните по синей клетке для хода, или по красной — для атаки';
+
   return (
     <div className="parchment rounded-xl border border-border p-4 animate-fade-in">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -317,17 +392,22 @@ const ActionPanel = ({
           <div>
             <p className={`font-display text-${color} text-lg leading-tight`}>{active.type.name}</p>
             <p className="font-sans text-xs text-muted-foreground">
-              Ход: {FACTION_LABEL_SHORT[active.side]} · {active.count} шт · АТК {active.type.atk}/ЗАЩ {active.type.def}
-              {active.type.ranged ? ' · 🏹 стрелок' : ''}
+              {FACTION_LABEL[active.side]} · {active.count} шт · АТК {active.type.atk} / ЗАЩ {active.type.def}
+              {active.type.ranged ? ' · 🏹' : ' · ⚔️'}
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
-          <button onClick={onToggleHero}
-            disabled={hero.mana < 2}
+        <div className="flex gap-2 flex-wrap">
+          {phase === 'select' && !heroMode && (
+            <button onClick={onActivate}
+              className={`font-serif text-sm px-4 py-2 rounded-lg border border-${color}/50 text-${color} hover:bg-${color}/10 transition`}>
+              Выбрать отряд
+            </button>
+          )}
+          <button onClick={onToggleHero} disabled={hero.mana < 2}
             className={`font-serif text-sm px-4 py-2 rounded-lg border transition disabled:opacity-40
               ${heroMode ? 'bg-gold text-primary-foreground border-gold' : 'border-gold/50 text-gold hover:bg-gold/10'}`}>
-            ⚡ Удар героя
+            ⚡ Герой {hero.mana}/{hero.maxMana}
           </button>
           <button onClick={onDefend}
             className="font-serif text-sm px-4 py-2 rounded-lg border border-border hover:bg-secondary transition">
@@ -335,27 +415,21 @@ const ActionPanel = ({
           </button>
         </div>
       </div>
-      <p className="font-sans text-xs text-muted-foreground mt-3">
-        {heroMode
-          ? 'Режим героя: выберите вражеский отряд для удара на дистанции (−2 маны).'
-          : 'Кликните по вражескому отряду, чтобы атаковать.'}
-      </p>
+      <p className="font-sans text-xs text-muted-foreground mt-3 italic">{hint}</p>
     </div>
   );
 };
 
-const FACTION_LABEL_SHORT: Record<Faction, string> = { haven: 'Хэйвен', necro: 'Некрополис' };
-
 const HeroPanel = ({ hero, active }: { hero: Hero; active: boolean }) => {
   const color = hero.faction === 'haven' ? 'haven' : 'necro';
   return (
-    <div className={`parchment rounded-xl border p-4 transition ${active ? `border-${color} animate-glow-pulse` : 'border-border'}`}>
+    <div className={`parchment rounded-xl border p-4 transition-all ${active ? `border-${color} animate-glow-pulse` : 'border-border'}`}>
       <div className="flex items-center gap-3">
         <span className="text-3xl">{hero.silhouette}</span>
         <div className="flex-1">
           <p className={`font-display text-${color}`}>{hero.name}</p>
           <p className="font-sans text-[11px] text-muted-foreground">
-            {FACTION_LABEL_SHORT[hero.faction]} · {hero.isMage ? 'Маг' : 'Воин'}
+            {FACTION_LABEL[hero.faction]} · {hero.isMage ? 'Маг' : 'Воин'}
           </p>
         </div>
       </div>

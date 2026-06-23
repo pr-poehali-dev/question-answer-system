@@ -10,10 +10,14 @@ export default {
 	],
 	prefix: "",
 	safelist: [
-		'text-haven', 'text-necro', 'bg-haven', 'bg-necro',
-		'border-haven', 'border-haven/40', 'border-haven/50', 'border-necro', 'border-necro/40',
-		'bg-haven/10', 'bg-haven/15', 'bg-haven/30', 'bg-necro/10', 'bg-necro/15', 'bg-necro/30',
-		'ring-haven', 'ring-necro',
+		'text-haven', 'text-necro',
+		'bg-haven', 'bg-necro',
+		'bg-haven/10', 'bg-haven/12', 'bg-haven/15', 'bg-haven/20', 'bg-haven/30',
+		'bg-necro/10', 'bg-necro/12', 'bg-necro/15', 'bg-necro/20', 'bg-necro/30',
+		'border-haven', 'border-haven/30', 'border-haven/40', 'border-haven/50',
+		'border-necro', 'border-necro/30', 'border-necro/40',
+		'hover:bg-haven/10', 'hover:bg-necro/10',
+		'border-2',
 	],
 	theme: {
 		container: {

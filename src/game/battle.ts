@@ -132,6 +132,56 @@ export function heroAttack(hero: Hero, target: Stack, frontX: number): DamageRes
   return { total, killed: Math.min(killed, target.count), multiplier: heroDiceMult(roll), roll };
 }
 
+export const MOVE_SPEED: Record<number, number> = { 1: 4, 2: 5, 3: 5, 4: 6, 5: 5, 6: 7, 7: 8 };
+
+export function getMoveCells(
+  mover: Stack,
+  allStacks: Stack[]
+): Set<string> {
+  const speed = MOVE_SPEED[mover.type.tier] ?? 5;
+  const occupied = new Set(allStacks.filter((s) => s.uid !== mover.uid && s.count > 0).map((s) => `${s.x},${s.y}`));
+  const reachable = new Set<string>();
+  const queue: Array<{ x: number; y: number; steps: number }> = [{ x: mover.x, y: mover.y, steps: 0 }];
+  const visited = new Set<string>([`${mover.x},${mover.y}`]);
+
+  while (queue.length) {
+    const cur = queue.shift()!;
+    if (cur.steps > 0 && !occupied.has(`${cur.x},${cur.y}`)) reachable.add(`${cur.x},${cur.y}`);
+    if (cur.steps >= speed) continue;
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = cur.x + dx, ny = cur.y + dy;
+      const key = `${nx},${ny}`;
+      if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      queue.push({ x: nx, y: ny, steps: cur.steps + 1 });
+    }
+  }
+  return reachable;
+}
+
+export function getAttackCells(mover: Stack, allStacks: Stack[]): Set<string> {
+  if (mover.type.ranged) {
+    const enemies = allStacks.filter((s) => s.side !== mover.side && s.count > 0);
+    return new Set(enemies.map((s) => `${s.x},${s.y}`));
+  }
+  const moveZone = getMoveCells(mover, allStacks);
+  const occupied = new Set(allStacks.filter((s) => s.uid !== mover.uid && s.count > 0).map((s) => `${s.x},${s.y}`));
+  const attackable = new Set<string>();
+  const reachIncl = new Set([`${mover.x},${mover.y}`, ...moveZone]);
+  for (const key of reachIncl) {
+    const [cx, cy] = key.split(',').map(Number);
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nk = `${cx+dx},${cy+dy}`;
+      if (occupied.has(nk)) {
+        const enemy = allStacks.find((s) => `${s.x},${s.y}` === nk && s.side !== mover.side && s.count > 0);
+        if (enemy) attackable.add(nk);
+      }
+    }
+  }
+  return attackable;
+}
+
 export function makeInitialStacks(): Stack[] {
   const stacks: Stack[] = [];
   HAVEN_UNITS.forEach((u, i) => {
