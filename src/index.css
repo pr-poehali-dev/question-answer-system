@@ -4,33 +4,40 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 240 20% 6%;
+    --foreground: 40 30% 88%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card: 240 18% 10%;
+    --card-foreground: 40 30% 88%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover: 240 18% 9%;
+    --popover-foreground: 40 30% 88%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    --primary: 42 65% 52%;
+    --primary-foreground: 240 30% 8%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 240 15% 16%;
+    --secondary-foreground: 40 30% 88%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 240 12% 18%;
+    --muted-foreground: 40 12% 60%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 42 60% 50%;
+    --accent-foreground: 240 30% 8%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 70% 45%;
+    --destructive-foreground: 40 30% 92%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --border: 240 14% 20%;
+    --input: 240 14% 18%;
+    --ring: 42 65% 52%;
+    --ring-glow: rgba(217, 164, 65, 0.5);
+
+    --haven: 210 70% 58%;
+    --haven-glow: 210 80% 50%;
+    --necro: 275 55% 58%;
+    --necro-glow: 275 70% 50%;
+    --gold: 42 75% 58%;
 
     --radius: 0.5rem;
 
@@ -96,6 +103,36 @@
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans;
+    background-image:
+      radial-gradient(
+        ellipse at 20% 0%,
+        hsl(275 40% 12% / 0.5),
+        transparent 55%
+      ),
+      radial-gradient(
+        ellipse at 80% 100%,
+        hsl(210 40% 12% / 0.5),
+        transparent 55%
+      ),
+      radial-gradient(circle at 50% 50%, hsl(240 20% 8%), hsl(240 24% 4%));
+    background-attachment: fixed;
+  }
+}
+
+@layer utilities {
+  .grid-cell {
+    background-image:
+      linear-gradient(hsl(42 30% 40% / 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(42 30% 40% / 0.08) 1px, transparent 1px);
+  }
+  .text-glow-gold {
+    text-shadow: 0 0 14px hsl(42 75% 55% / 0.55);
+  }
+  .parchment {
+    background: linear-gradient(
+      hsl(240 18% 11% / 0.95),
+      hsl(240 20% 8% / 0.95)
+    );
   }
 }
