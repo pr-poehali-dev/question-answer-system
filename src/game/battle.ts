@@ -9,9 +9,11 @@ export interface UnitType {
   atk: number;
   def: number;
   baseInit: number;
-  dice: number;
+  minDmg: number;
+  maxDmg: number;
   hp: number;
   ranged: boolean;
+  morale: number;
 }
 
 export interface Stack {
@@ -25,21 +27,26 @@ export interface Stack {
   initRoll: number;
   defending: boolean;
   hasActed: boolean;
+  waited: boolean;
+  morale: number;
+  luck: number;
 }
 
 export const COLS = 10;
 export const ROWS = 8;
 
+// ── Юниты ──────────────────────────────────────────────────────────────
+// minDmg/maxDmg — как в HoMM V, morale: 1=нормально, 0=нежить (вне морали)
 export const HAVEN_UNITS: UnitType[] = [
-  { id: 'militia', name: 'Ополченец', faction: 'haven', icon: '🛡️', tier: 1, atk: 4, def: 5, baseInit: 4, dice: 4, hp: 6, ranged: false },
-  { id: 'crossbow', name: 'Арбалетчик', faction: 'haven', icon: '🏹', tier: 2, atk: 6, def: 4, baseInit: 5, dice: 6, hp: 8, ranged: true },
-  { id: 'paladin', name: 'Паладин', faction: 'haven', icon: '⚔️', tier: 6, atk: 11, def: 10, baseInit: 7, dice: 10, hp: 30, ranged: false },
+  { id: 'militia',  name: 'Ополченец',  faction: 'haven', icon: '🛡️', tier: 1, atk: 4,  def: 5,  baseInit: 5,  minDmg: 1,  maxDmg: 3,  hp: 6,  ranged: false, morale: 1 },
+  { id: 'crossbow', name: 'Арбалетчик', faction: 'haven', icon: '🏹', tier: 2, atk: 6,  def: 4,  baseInit: 6,  minDmg: 2,  maxDmg: 4,  hp: 8,  ranged: true,  morale: 1 },
+  { id: 'paladin',  name: 'Паладин',    faction: 'haven', icon: '⚔️', tier: 6, atk: 11, def: 10, baseInit: 9,  minDmg: 10, maxDmg: 20, hp: 35, ranged: false, morale: 1 },
 ];
 
 export const NECRO_UNITS: UnitType[] = [
-  { id: 'skeleton', name: 'Скелет-лучник', faction: 'necro', icon: '💀', tier: 1, atk: 5, def: 3, baseInit: 4, dice: 4, hp: 5, ranged: true },
-  { id: 'vampire', name: 'Вампир', faction: 'necro', icon: '🦇', tier: 4, atk: 8, def: 7, baseInit: 6, dice: 8, hp: 18, ranged: false },
-  { id: 'lich', name: 'Лич', faction: 'necro', icon: '🔮', tier: 5, atk: 10, def: 6, baseInit: 5, dice: 8, hp: 22, ranged: true },
+  { id: 'skeleton', name: 'Скелет-лучник', faction: 'necro', icon: '💀', tier: 1, atk: 5,  def: 3, baseInit: 5,  minDmg: 1,  maxDmg: 3,  hp: 5,  ranged: true,  morale: 0 },
+  { id: 'vampire',  name: 'Вампир',        faction: 'necro', icon: '🦇', tier: 4, atk: 8,  def: 7, baseInit: 9,  minDmg: 5,  maxDmg: 8,  hp: 18, ranged: false, morale: 0 },
+  { id: 'lich',     name: 'Лич',           faction: 'necro', icon: '🔮', tier: 5, atk: 10, def: 6, baseInit: 8,  minDmg: 6,  maxDmg: 10, hp: 22, ranged: true,  morale: 0 },
 ];
 
 export interface Hero {
@@ -54,41 +61,92 @@ export interface Hero {
 }
 
 export const HEROES: Record<Faction, Hero> = {
-  haven: { name: 'Сэр Роланд', faction: 'haven', silhouette: '🤴', atk: 6, magic: 3, mana: 8, maxMana: 8, isMage: false },
-  necro: { name: 'Мортис', faction: 'necro', silhouette: '🧙', atk: 3, magic: 7, mana: 10, maxMana: 10, isMage: true },
+  haven: { name: 'Сэр Роланд', faction: 'haven', silhouette: '🤴', atk: 6, magic: 3, mana: 8,  maxMana: 8,  isMage: false },
+  necro: { name: 'Мортис',     faction: 'necro', silhouette: '🧙', atk: 3, magic: 7, mana: 10, maxMana: 10, isMage: true  },
 };
 
+// ── Скорости по HoMM V (тир → клеток за ход) ──────────────────────────
+export const MOVE_SPEED: Record<number, number> = { 1: 5, 2: 6, 3: 5, 4: 7, 5: 6, 6: 7, 7: 10 };
+
+// ── Рандом ─────────────────────────────────────────────────────────────
 export const d = (sides: number) => Math.floor(Math.random() * sides) + 1;
+export const rng = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-export function avgDice(sides: number) {
-  return (sides + 1) / 2;
-}
-
+// ── Инициатива ─────────────────────────────────────────────────────────
 export function rollInitiative(stacks: Stack[]): Stack[] {
   return stacks
-    .map((s) => ({ ...s, initRoll: s.type.baseInit + d(4), defending: false, hasActed: false }))
+    .map((s) => ({ ...s, initRoll: s.type.baseInit + d(4), defending: false, hasActed: false, waited: false }))
     .sort((a, b) => b.initRoll - a.initRoll || b.type.baseInit - a.type.baseInit);
 }
 
+// ── Мораль фракций ─────────────────────────────────────────────────────
+// Хэйвен +1, Некрополис (нежить) 0 — иммунна к морали
+export function factionMorale(side: Faction): number {
+  return side === 'haven' ? 1 : 0;
+}
+
+export function factionLuck(side: Faction): number {
+  return side === 'haven' ? 1 : 0;
+}
+
+// Бросок морали: возвращает 'extra' | 'none' | 'skip'
+export function rollMorale(stack: Stack): 'extra' | 'none' | 'skip' {
+  if (stack.type.morale === 0) return 'none'; // нежить — вне системы
+  const m = stack.morale;
+  if (m >= 1) {
+    const chance = m === 1 ? 0.083 : m === 2 ? 0.167 : 0.25;
+    if (Math.random() < chance) return 'extra';
+  }
+  if (m <= -1) {
+    const chance = m === -1 ? 0.083 : m === -2 ? 0.167 : 0.25;
+    if (Math.random() < chance) return 'skip';
+  }
+  return 'none';
+}
+
+// Бросок удачи: возвращает ×1.5 или ×1 (негативная — 0.5)
+export function rollLuck(stack: Stack): number {
+  const l = stack.luck;
+  if (l >= 1) {
+    const chance = l === 1 ? 0.1 : l === 2 ? 0.2 : 0.3;
+    if (Math.random() < chance) return 1.5;
+  }
+  if (l <= -1) {
+    const chance = l === -1 ? 0.1 : l === -2 ? 0.2 : 0.3;
+    if (Math.random() < chance) return 0.5;
+  }
+  return 1;
+}
+
+// ── Дистанция ──────────────────────────────────────────────────────────
 export function distance(a: Stack, b: Stack) {
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 }
 
-export interface DamageResult {
-  total: number;
-  killed: number;
-  multiplier: number;
+export function isAdjacentTo(a: Stack, b: Stack): boolean {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1;
 }
 
+// ── Блокировка стрелков ────────────────────────────────────────────────
 export function isRangedBlocked(stack: Stack, allStacks: Stack[]): boolean {
   if (!stack.type.ranged) return false;
   return allStacks.some(
-    (s) =>
-      s.side !== stack.side &&
-      s.count > 0 &&
-      !s.type.ranged &&
+    (s) => s.side !== stack.side && s.count > 0 && !s.type.ranged &&
       Math.abs(s.x - stack.x) + Math.abs(s.y - stack.y) === 1
   );
+}
+
+// ── Формула урона (HoMM V) ─────────────────────────────────────────────
+// ATK > DEF: +5% за каждый пункт разницы (линейно)
+// DEF > ATK: нелинейное затухание — никогда не уходит в 0
+// Минимум 10% базового урона
+export function calcDamageMult(atk: number, def: number): number {
+  if (atk >= def) {
+    return 1 + 0.05 * (atk - def);
+  } else {
+    const diff = def - atk;
+    return 1 - diff / (diff + 20);
+  }
 }
 
 export interface DamageResult {
@@ -96,28 +154,45 @@ export interface DamageResult {
   killed: number;
   multiplier: number;
   blocked?: boolean;
-  meleePenalty?: boolean;
+  shooterMeleePenalty?: boolean;
+  luckMult?: number;
+  moraleTrigger?: 'extra' | 'skip' | 'none';
 }
 
-export function computeDamage(attacker: Stack, target: Stack, allStacks: Stack[]): DamageResult {
+export function computeDamage(
+  attacker: Stack,
+  target: Stack,
+  allStacks: Stack[]
+): DamageResult {
   const t = attacker.type;
   const tgtDef = target.type.def + (target.defending ? 2 : 0);
 
+  // Стрелок заблокирован ближним бойцом
   if (t.ranged && isRangedBlocked(attacker, allStacks)) {
     return { total: 0, killed: 0, multiplier: 0, blocked: true };
   }
 
-  let mult = 1 + (t.atk - tgtDef) / 20;
-  if (mult < 0.5) mult = 0.5;
+  let mult = calcDamageMult(t.atk, tgtDef);
 
+  // Минимум 10% (как в HoMM V)
+  if (mult < 0.1) mult = 0.1;
+
+  // Стрелок атакует в ближнем бою — штраф ×0.5 (как в HoMM V)
+  const shooterMeleePenalty = t.ranged && isAdjacentTo(attacker, target);
+  if (shooterMeleePenalty) mult *= 0.5;
+
+  // Штраф дальности ×0.5 (дальше 5 клеток)
   let rangePenalty = 1;
-  if (t.ranged && distance(attacker, target) > 5) rangePenalty = 0.5;
+  if (t.ranged && !shooterMeleePenalty && distance(attacker, target) > 5) rangePenalty = 0.5;
 
-  const meleePenalty = !t.ranged && target.type.ranged && isAdjacentTo(attacker, target);
-  if (meleePenalty) mult *= 0.75;
+  // Разброс урона: min/maxDmg на каждого юнита в стеке
+  const baseDmg = rng(t.minDmg, t.maxDmg) * attacker.count;
 
-  const raw = attacker.count * avgDice(t.dice) * mult * rangePenalty;
-  const total = Math.max(1, Math.round(raw));
+  // Удача
+  const luckMult = rollLuck(attacker);
+
+  const raw = baseDmg * mult * rangePenalty * luckMult;
+  const total = Math.max(Math.round(t.minDmg * attacker.count * 0.1), Math.round(raw));
 
   const totalTargetHp = (target.count - 1) * target.type.hp + target.curHp;
   const remaining = totalTargetHp - total;
@@ -127,14 +202,12 @@ export function computeDamage(attacker: Stack, target: Stack, allStacks: Stack[]
     total,
     killed: Math.min(killed, target.count),
     multiplier: Math.round(mult * rangePenalty * 100) / 100,
-    meleePenalty,
+    shooterMeleePenalty,
+    luckMult,
   };
 }
 
-export function isAdjacentTo(a: Stack, b: Stack): boolean {
-  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1;
-}
-
+// ── Применить урон к стеку ─────────────────────────────────────────────
 export function applyDamage(target: Stack, dmg: number): Stack {
   const totalHp = (target.count - 1) * target.type.hp + target.curHp;
   const remaining = totalHp - dmg;
@@ -144,19 +217,18 @@ export function applyDamage(target: Stack, dmg: number): Stack {
   return { ...target, count: newCount, curHp: newCurHp };
 }
 
+// ── Атака героя ────────────────────────────────────────────────────────
 const heroDiceMult = (roll: number) => {
   if (roll <= 2) return 0.25;
   if (roll <= 4) return 0.5;
   if (roll === 5) return 0.75;
   return 1.5;
 };
-
 const heroDistProb = (dist: number, defending: boolean) => {
   if (dist <= 3) return defending ? 0.5 : 0.75;
   if (dist <= 6) return defending ? 0.25 : 0.5;
   return defending ? 0 : 0.25;
 };
-
 export function heroAttack(hero: Hero, target: Stack, frontX: number): DamageResult & { roll: number } {
   const stat = hero.isMage ? hero.magic : hero.atk;
   const roll = d(6);
@@ -168,12 +240,8 @@ export function heroAttack(hero: Hero, target: Stack, frontX: number): DamageRes
   return { total, killed: Math.min(killed, target.count), multiplier: heroDiceMult(roll), roll };
 }
 
-export const MOVE_SPEED: Record<number, number> = { 1: 4, 2: 5, 3: 5, 4: 6, 5: 5, 6: 7, 7: 8 };
-
-export function getMoveCells(
-  mover: Stack,
-  allStacks: Stack[]
-): Set<string> {
+// ── Движение по полю (BFS) ─────────────────────────────────────────────
+export function getMoveCells(mover: Stack, allStacks: Stack[]): Set<string> {
   const speed = MOVE_SPEED[mover.type.tier] ?? 5;
   const occupied = new Set(allStacks.filter((s) => s.uid !== mover.uid && s.count > 0).map((s) => `${s.x},${s.y}`));
   const reachable = new Set<string>();
@@ -198,8 +266,7 @@ export function getMoveCells(
 
 export function getAttackCells(mover: Stack, allStacks: Stack[]): Set<string> {
   if (mover.type.ranged) {
-    const enemies = allStacks.filter((s) => s.side !== mover.side && s.count > 0);
-    return new Set(enemies.map((s) => `${s.x},${s.y}`));
+    return new Set(allStacks.filter((s) => s.side !== mover.side && s.count > 0).map((s) => `${s.x},${s.y}`));
   }
   const moveZone = getMoveCells(mover, allStacks);
   const occupied = new Set(allStacks.filter((s) => s.uid !== mover.uid && s.count > 0).map((s) => `${s.x},${s.y}`));
@@ -218,18 +285,27 @@ export function getAttackCells(mover: Stack, allStacks: Stack[]): Set<string> {
   return attackable;
 }
 
+// ── Начальные стеки ────────────────────────────────────────────────────
 export function makeInitialStacks(): Stack[] {
   const stacks: Stack[] = [];
   HAVEN_UNITS.forEach((u, i) => {
     stacks.push({
-      uid: `h${i}`, type: u, side: 'haven', count: u.tier >= 5 ? 4 : u.tier >= 3 ? 8 : 20,
-      curHp: u.hp, x: i === 1 ? 0 : 1, y: 1 + i * 2, initRoll: 0, defending: false, hasActed: false,
+      uid: `h${i}`, type: u, side: 'haven',
+      count: u.tier >= 5 ? 4 : u.tier >= 3 ? 8 : 20,
+      curHp: u.hp, x: i === 1 ? 0 : 1, y: 1 + i * 2,
+      initRoll: 0, defending: false, hasActed: false, waited: false,
+      morale: factionMorale('haven'),
+      luck: factionLuck('haven'),
     });
   });
   NECRO_UNITS.forEach((u, i) => {
     stacks.push({
-      uid: `n${i}`, type: u, side: 'necro', count: u.tier >= 5 ? 4 : u.tier >= 3 ? 8 : 20,
-      curHp: u.hp, x: i === 0 || i === 2 ? COLS - 1 : COLS - 2, y: 1 + i * 2, initRoll: 0, defending: false, hasActed: false,
+      uid: `n${i}`, type: u, side: 'necro',
+      count: u.tier >= 5 ? 4 : u.tier >= 3 ? 8 : 20,
+      curHp: u.hp, x: i === 0 || i === 2 ? COLS - 1 : COLS - 2, y: 1 + i * 2,
+      initRoll: 0, defending: false, hasActed: false, waited: false,
+      morale: factionMorale('necro'),
+      luck: factionLuck('necro'),
     });
   });
   return stacks;

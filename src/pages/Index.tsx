@@ -3,18 +3,19 @@ import Icon from '@/components/ui/icon';
 import {
   COLS, ROWS, Stack, Faction, makeInitialStacks, rollInitiative,
   computeDamage, applyDamage, heroAttack, HEROES, Hero,
-  getMoveCells, getAttackCells, isRangedBlocked,
+  getMoveCells, getAttackCells, isRangedBlocked, rollMorale,
 } from '@/game/battle';
 
 const FACTION_LABEL: Record<Faction, string> = { haven: 'Хэйвен', necro: 'Некрополис' };
 
-interface LogEntry { text: string; tone: 'haven' | 'necro' | 'system' }
+interface LogEntry { text: string; tone: 'haven' | 'necro' | 'system' | 'luck' | 'morale' }
 
 type Phase = 'select' | 'move';
 
 const Index = () => {
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [order, setOrder] = useState<Stack[]>([]);
+  const [waitQueue, setWaitQueue] = useState<Stack[]>([]);
   const [turnIdx, setTurnIdx] = useState(0);
   const [round, setRound] = useState(1);
   const [heroes, setHeroes] = useState<Record<Faction, Hero>>(HEROES);
@@ -24,9 +25,10 @@ const Index = () => {
   const [winner, setWinner] = useState<Faction | null>(null);
   const [shakeUid, setShakeUid] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>('select');
+  const [extraTurnUid, setExtraTurnUid] = useState<string | null>(null);
 
-  const addLog = useCallback((text: string, tone: LogEntry['tone']) => {
-    setLog((l) => [{ text, tone }, ...l].slice(0, 40));
+  const addLog = useCallback((text: string, tone: LogEntry['tone'] = 'system') => {
+    setLog((l) => [{ text, tone }, ...l].slice(0, 60));
   }, []);
 
   const startBattle = () => {
@@ -34,6 +36,7 @@ const Index = () => {
     const ord = rollInitiative(init);
     setStacks(ord);
     setOrder(ord);
+    setWaitQueue([]);
     setTurnIdx(0);
     setRound(1);
     setHeroes(HEROES);
@@ -41,7 +44,8 @@ const Index = () => {
     setWinner(null);
     setHeroMode(false);
     setPhase('select');
-    setLog([{ text: 'Битва началась! Брошена инициатива.', tone: 'system' }]);
+    setExtraTurnUid(null);
+    setLog([{ text: 'Битва началась! Инициатива брошена.', tone: 'system' }]);
   };
 
   const activeOrder = order[turnIdx];
@@ -53,26 +57,44 @@ const Index = () => {
   const checkWin = useCallback((next: Stack[]) => {
     const hAlive = next.some((s) => s.side === 'haven' && s.count > 0);
     const nAlive = next.some((s) => s.side === 'necro' && s.count > 0);
-    if (!hAlive) { setWinner('necro'); addLog('Некрополис побеждает! Хэйвен пал.', 'necro'); return true; }
-    if (!nAlive) { setWinner('haven'); addLog('Хэйвен побеждает! Нежить рассеяна.', 'haven'); return true; }
+    if (!hAlive) { setWinner('necro'); addLog('⚰️ Некрополис побеждает! Хэйвен пал.', 'necro'); return true; }
+    if (!nAlive) { setWinner('haven'); addLog('✝️ Хэйвен побеждает! Нежить рассеяна.', 'haven'); return true; }
     return false;
   }, [addLog]);
 
-  const advanceTurn = useCallback((current: Stack[]) => {
+  const advanceTurn = useCallback((current: Stack[], extraSkipUid?: string) => {
+    // Если есть очередь ожидания и основной порядок исчерпан — добавить ждунов
     let next = turnIdx + 1;
     while (next < order.length && !current.find((s) => s.uid === order[next].uid && s.count > 0)) next++;
+
     if (next >= order.length) {
+      // Конец раунда — добавляем ждунов в конец, потом новый раунд
+      if (waitQueue.length > 0) {
+        const alive = waitQueue.filter((s) => current.find((c) => c.uid === s.uid && c.count > 0));
+        if (alive.length > 0) {
+          const newOrder = [...order.slice(0, next), ...alive];
+          setOrder(newOrder);
+          setTurnIdx(next);
+          setWaitQueue([]);
+          setPhase('select');
+          setHeroMode(false);
+          return;
+        }
+      }
       const reordered = rollInitiative(current.filter((s) => s.count > 0));
       setOrder(reordered);
+      setWaitQueue([]);
       setTurnIdx(0);
       setRound((r) => r + 1);
-      addLog(`— Раунд ${round + 1} —`, 'system');
+      addLog(`── Раунд ${round + 1} ──`, 'system');
     } else {
       setTurnIdx(next);
     }
     setPhase('select');
     setHeroMode(false);
-  }, [order, turnIdx, round, addLog]);
+    setExtraTurnUid(null);
+    void extraSkipUid;
+  }, [order, turnIdx, round, waitQueue, addLog]);
 
   const blockedRangedUids = useMemo(() =>
     new Set(stacks.filter((s) => s.count > 0 && isRangedBlocked(s, stacks)).map((s) => s.uid)),
@@ -94,7 +116,15 @@ const Index = () => {
     if (!target) return;
 
     if (attackerStack.type.ranged && isRangedBlocked(attackerStack, currentStacks)) {
-      addLog(`🚫 ${attackerStack.type.name} заблокирован в ближнем бою — не может стрелять!`, 'system');
+      addLog(`🚫 ${attackerStack.type.name} заблокирован — не может стрелять!`, 'system');
+      advanceTurn(currentStacks);
+      return;
+    }
+
+    // Бросок морали перед атакой
+    const moraleResult = rollMorale(attackerStack);
+    if (moraleResult === 'skip') {
+      addLog(`😰 ${attackerStack.type.name} теряет боевой дух и пропускает ход!`, 'morale');
       advanceTurn(currentStacks);
       return;
     }
@@ -104,18 +134,36 @@ const Index = () => {
     setShakeUid(targetUid);
     setTimeout(() => setShakeUid(null), 350);
 
-    const penaltyNote = res.meleePenalty ? ' ⚔️→🏹 −25%' : '';
+    let note = '';
+    if (res.luckMult && res.luckMult > 1) note += ' 🍀 Удача! ×1.5';
+    if (res.luckMult && res.luckMult < 1) note += ' 💀 Невезение ×0.5';
+    if (res.shooterMeleePenalty) note += ' 🏹→⚔️ −50%';
+
     addLog(
-      `${attackerStack.type.name} бьёт ${target.type.name}: ${res.total} урона (×${res.multiplier})${penaltyNote}${res.killed > 0 ? `, убито ${res.killed}` : ''}`,
+      `${attackerStack.type.name} бьёт ${target.type.name}: ${res.total} урона (×${res.multiplier})${note}${res.killed > 0 ? ` · убито ${res.killed}` : ''}`,
       attackerStack.side
     );
+
     setStacks(updated);
-    if (!checkWin(updated)) advanceTurn(updated);
-  }, [addLog, checkWin, advanceTurn]);
+
+    if (!checkWin(updated)) {
+      if (moraleResult === 'extra') {
+        addLog(`⚡ ${attackerStack.type.name} воодушевлён и ходит снова!`, 'morale');
+        setExtraTurnUid(attackerStack.uid);
+        // Вставляем доп. ход сразу за текущим
+        const newOrder = [
+          ...order.slice(0, turnIdx + 1),
+          { ...attackerStack },
+          ...order.slice(turnIdx + 1),
+        ];
+        setOrder(newOrder);
+      }
+      advanceTurn(updated);
+    }
+  }, [addLog, checkWin, advanceTurn, order, turnIdx]);
 
   const handleCellClick = (x: number, y: number) => {
     if (winner || !activeStack) return;
-
     const clickedStack = stacks.find((s) => s.x === x && s.y === y && s.count > 0);
 
     if (heroMode) {
@@ -128,7 +176,7 @@ const Index = () => {
         setShakeUid(clickedStack.uid);
         setTimeout(() => setShakeUid(null), 350);
         setHeroes((h) => ({ ...h, [activeStack.side]: { ...hero, mana: hero.mana - 2 } }));
-        addLog(`⚡ ${hero.name} атакует ${clickedStack.type.name}: ${res.total} урона (d6=${res.roll})${res.killed > 0 ? `, убито ${res.killed}` : ''}`, activeStack.side);
+        addLog(`⚡ ${hero.name} атакует ${clickedStack.type.name}: ${res.total} урона (d6=${res.roll})${res.killed > 0 ? ` · убито ${res.killed}` : ''}`, activeStack.side);
         setStacks(updated);
         if (!checkWin(updated)) advanceTurn(updated);
       }
@@ -138,7 +186,7 @@ const Index = () => {
     if (phase === 'select') {
       if (clickedStack?.uid === activeStack.uid) {
         setPhase('move');
-        addLog(`${activeStack.type.name}: выберите клетку хода или врага`, activeStack.side);
+        addLog(`${activeStack.type.name}: выберите клетку или врага`, activeStack.side);
       }
       return;
     }
@@ -147,31 +195,26 @@ const Index = () => {
       const key = `${x},${y}`;
 
       if (attackCells.has(key) && clickedStack && clickedStack.side !== activeStack.side) {
-        const enemyAdj = stacks.find((s) => s.x === x && s.y === y && s.side !== activeStack.side && s.count > 0);
-        if (enemyAdj) {
-          if (!activeStack.type.ranged) {
-            const adjToEnemy = [[x+1,y],[x-1,y],[x,y+1],[x,y-1]].find(([nx,ny]) => {
-              const adjKey = `${nx},${ny}`;
-              const occupied = stacks.some((s) => s.uid !== activeStack.uid && s.count > 0 && s.x === nx && s.y === ny);
-              return moveCells.has(adjKey) && !occupied;
-            });
-            const moveTarget = adjToEnemy
-              ? { x: adjToEnemy[0], y: adjToEnemy[1] }
-              : { x: activeStack.x, y: activeStack.y };
-            const movedStack = { ...activeStack, x: moveTarget.x, y: moveTarget.y };
-            const withMove = stacks.map((s) => s.uid === activeStack.uid ? movedStack : s);
-            setStacks(withMove);
-            doAttack(movedStack, enemyAdj.uid, withMove);
-          } else {
-            doAttack(activeStack, enemyAdj.uid, stacks);
-          }
-          return;
+        if (!activeStack.type.ranged) {
+          const adjToEnemy = [[x+1,y],[x-1,y],[x,y+1],[x,y-1]].find(([nx,ny]) => {
+            const adjKey = `${nx},${ny}`;
+            const occupied = stacks.some((s) => s.uid !== activeStack.uid && s.count > 0 && s.x === nx && s.y === ny);
+            return moveCells.has(adjKey) && !occupied;
+          });
+          const moveTarget = adjToEnemy ? { x: adjToEnemy[0], y: adjToEnemy[1] } : { x: activeStack.x, y: activeStack.y };
+          const movedStack = { ...activeStack, x: moveTarget.x, y: moveTarget.y };
+          const withMove = stacks.map((s) => s.uid === activeStack.uid ? movedStack : s);
+          setStacks(withMove);
+          doAttack(movedStack, clickedStack.uid, withMove);
+        } else {
+          doAttack(activeStack, clickedStack.uid, stacks);
         }
+        return;
       }
 
       if (moveCells.has(key) && !clickedStack) {
         const updated = stacks.map((s) => s.uid === activeStack.uid ? { ...s, x, y } : s);
-        addLog(`${activeStack.type.name} переходит на (${x+1},${y+1})`, activeStack.side);
+        addLog(`${activeStack.type.name} → (${x+1},${y+1})`, activeStack.side);
         setStacks(updated);
         advanceTurn(updated);
         return;
@@ -184,9 +227,16 @@ const Index = () => {
   const performDefend = () => {
     if (!activeStack) return;
     const updated = stacks.map((s) => s.uid === activeStack.uid ? { ...s, defending: true } : s);
-    addLog(`${activeStack.type.name} встаёт в защиту (+2 защита)`, activeStack.side);
+    addLog(`🛡️ ${activeStack.type.name} встаёт в защиту (+2 к защите)`, activeStack.side);
     setStacks(updated);
     advanceTurn(updated);
+  };
+
+  const performWait = () => {
+    if (!activeStack) return;
+    addLog(`⏳ ${activeStack.type.name} ждёт...`, activeStack.side);
+    setWaitQueue((q) => [...q, activeStack]);
+    advanceTurn(stacks);
   };
 
   const countAlive = (side: Faction) =>
@@ -217,6 +267,7 @@ const Index = () => {
               moveCells={moveCells}
               attackCells={attackCells}
               blockedRangedUids={blockedRangedUids}
+              extraTurnUid={extraTurnUid}
               heroMode={heroMode}
               phase={phase}
               shakeUid={shakeUid}
@@ -231,6 +282,7 @@ const Index = () => {
                 phase={phase}
                 onToggleHero={() => { setHeroMode((m) => !m); setPhase('move'); }}
                 onDefend={performDefend}
+                onWait={performWait}
                 onActivate={() => setPhase('move')}
               />
             )}
@@ -262,16 +314,32 @@ const StartScreen = ({ onStart }: { onStart: () => void }) => (
   <div className="max-w-3xl mx-auto parchment rounded-2xl border border-border p-8 md:p-12 text-center animate-scale-in">
     <p className="font-serif text-muted-foreground leading-relaxed mb-6">
       После Войны Фракций выжившие осели на последнем материке — Драконьей Обители.
-      Хрупкое перемирие нарушено. Поведите армию в тактическом бою на сетке 10×8:
-      инициатива, формулы урона, движение по клеткам, удары героя на дистанции.
+      Хрупкое перемирие нарушено. Механика боя близка к HoMM V: формула урона, разброс,
+      мораль, удача, блокировка стрелков, ход «Ждать».
     </p>
-    <div className="grid grid-cols-2 gap-4 mb-8 text-left">
+    <div className="grid grid-cols-2 gap-4 mb-6 text-left">
       {(['haven', 'necro'] as Faction[]).map((f) => (
         <div key={f} className={`rounded-xl border border-${f}/40 bg-${f}/10 p-4`}>
           <h3 className={`font-display text-${f} text-lg`}>{FACTION_LABEL[f]}</h3>
           <p className="font-sans text-xs text-muted-foreground mt-1">
-            {f === 'haven' ? 'Щит и вера. Держат линию дольше всех.' : 'Смерть — не конец. Армия растёт.'}
+            {f === 'haven' ? 'Мораль +1 · Удача +1 · Щит и вера' : 'Нежить · Иммунитет к морали · Смерть не конец'}
           </p>
+        </div>
+      ))}
+    </div>
+    <div className="grid grid-cols-3 gap-3 mb-8 text-left">
+      {[
+        ['🎲', 'Разброс урона', 'min/max как в HoMM V'],
+        ['⚡', 'Мораль', 'Доп. ход или пропуск'],
+        ['🍀', 'Удача', '×1.5 или ×0.5 урона'],
+        ['⏳', 'Ждать', 'Ход в конце раунда'],
+        ['🚫', 'Блокировка', 'Стрелок вплотную'],
+        ['🏹→⚔️', 'Штраф', 'Стрелок в ближнем −50%'],
+      ].map(([icon, title, desc]) => (
+        <div key={title} className="rounded-lg border border-border bg-secondary/30 p-3">
+          <p className="text-lg mb-0.5">{icon}</p>
+          <p className="font-sans text-xs font-semibold text-foreground">{title}</p>
+          <p className="font-sans text-[11px] text-muted-foreground">{desc}</p>
         </div>
       ))}
     </div>
@@ -297,13 +365,15 @@ const ScoreBar = ({ haven, necro, round }: { haven: number; necro: number; round
 );
 
 const Battlefield = ({
-  stacks, activeUid, moveCells, attackCells, blockedRangedUids, heroMode, phase, shakeUid, onCellClick,
+  stacks, activeUid, moveCells, attackCells, blockedRangedUids,
+  extraTurnUid, heroMode, phase, shakeUid, onCellClick,
 }: {
   stacks: Stack[];
   activeUid: string | null;
   moveCells: Set<string>;
   attackCells: Set<string>;
   blockedRangedUids: Set<string>;
+  extraTurnUid: string | null;
   heroMode: boolean;
   phase: Phase;
   shakeUid: string | null;
@@ -311,6 +381,7 @@ const Battlefield = ({
 }) => {
   const cellMap = new Map<string, Stack>();
   stacks.forEach((s) => { if (s.count > 0) cellMap.set(`${s.x},${s.y}`, s); });
+  const activeSide = stacks.find((s) => s.uid === activeUid)?.side;
 
   return (
     <div className="parchment rounded-xl border border-gold/30 p-3 md:p-4 overflow-x-auto">
@@ -320,8 +391,7 @@ const Battlefield = ({
           display: 'grid',
           gridTemplateColumns: `repeat(${COLS}, minmax(40px, 1fr))`,
           gridTemplateRows: `repeat(${ROWS}, minmax(40px, 1fr))`,
-          gap: 3,
-          minWidth: 420,
+          gap: 3, minWidth: 420,
         }}
       >
         {Array.from({ length: ROWS }).map((_, y) =>
@@ -329,14 +399,15 @@ const Battlefield = ({
             const key = `${x},${y}`;
             const stack = cellMap.get(key);
             const isActive = stack?.uid === activeUid;
+            const isExtra = stack?.uid === extraTurnUid;
             const isMove = moveCells.has(key) && !stack;
-            const isAttack = attackCells.has(key) && stack;
-            const isHeroTarget = heroMode && phase === 'move' && stack && stack.uid !== activeUid && stack.side !== stacks.find(s => s.uid === activeUid)?.side;
+            const isAttack = attackCells.has(key) && stack && stack.side !== activeSide;
+            const isHeroTarget = heroMode && phase === 'move' && stack && stack.side !== activeSide;
             const color = stack?.side === 'haven' ? 'haven' : 'necro';
 
             let bgClass = 'bg-transparent border border-white/5 hover:border-white/15';
             if (isMove) bgClass = 'bg-blue-500/20 border border-blue-400/60 hover:bg-blue-500/35 cursor-pointer';
-            if (isAttack) bgClass = `bg-red-600/25 border border-red-400/70 hover:bg-red-600/40 cursor-pointer`;
+            if (isAttack) bgClass = 'bg-red-600/25 border border-red-400/70 hover:bg-red-600/40 cursor-pointer';
             if (isHeroTarget) bgClass = `bg-${color}/20 border border-gold/60 hover:bg-gold/20 cursor-pointer`;
             if (isActive) bgClass = `bg-${color}/20 border-2 border-gold animate-glow-pulse cursor-pointer`;
             if (stack && !isActive && !isAttack && !isHeroTarget)
@@ -352,28 +423,27 @@ const Battlefield = ({
                   shakeUid === stack?.uid ? 'animate-hit-shake' : '',
                 ].join(' ')}
               >
-                {isMove && (
-                  <span className="text-blue-300/70 text-base">·</span>
-                )}
+                {isMove && <span className="text-blue-300/60 text-lg leading-none">·</span>}
                 {stack && (
                   <>
                     <span className="text-xl leading-none">{stack.type.icon}</span>
-                    <span className={`absolute -bottom-1 -right-1 text-[10px] font-bold px-1 rounded-sm
-                      ${stack.side === 'haven' ? 'bg-haven text-background' : 'bg-necro text-background'}
-                      min-w-[16px] text-center leading-4`}>
+                    <span className={`absolute -bottom-1 -right-1 text-[10px] font-bold px-1 rounded-sm min-w-[16px] text-center leading-4
+                      ${stack.side === 'haven' ? 'bg-haven text-background' : 'bg-necro text-background'}`}>
                       {stack.count}
                     </span>
-                    {stack.defending && (
-                      <Icon name="Shield" size={9} className="absolute top-0 left-0 text-gold opacity-80" />
-                    )}
-                    {blockedRangedUids.has(stack.uid) && (
-                      <Icon name="Lock" size={9} className="absolute top-0 right-0 text-orange-400 opacity-90" />
-                    )}
+                    {stack.defending && <Icon name="Shield" size={9} className="absolute top-0 left-0 text-gold opacity-80" />}
+                    {blockedRangedUids.has(stack.uid) && <Icon name="Lock" size={9} className="absolute top-0 right-0 text-orange-400" />}
+                    {isExtra && <span className="absolute -top-1 -left-1 text-[9px] text-yellow-300">⚡</span>}
                     {isActive && phase === 'select' && (
-                      <span className="absolute -top-1 -right-1 text-[8px] bg-gold text-primary-foreground rounded px-0.5 leading-3 py-0.5">
-                        ▶
-                      </span>
+                      <span className="absolute -top-1 -right-1 text-[8px] bg-gold text-primary-foreground rounded px-0.5 leading-3 py-0.5">▶</span>
                     )}
+                    {/* HP bar */}
+                    <div className="absolute bottom-0 left-0 right-0 h-0.5 rounded-b-md bg-black/40">
+                      <div
+                        className={`h-full rounded-b-md ${stack.side === 'haven' ? 'bg-haven' : 'bg-necro'}`}
+                        style={{ width: `${(stack.curHp / stack.type.hp) * 100}%` }}
+                      />
+                    </div>
                   </>
                 )}
               </button>
@@ -381,28 +451,30 @@ const Battlefield = ({
           })
         )}
       </div>
-      <div className="flex gap-4 mt-2 px-1 text-[11px] text-muted-foreground font-sans">
+      <div className="flex flex-wrap gap-3 mt-2 px-1 text-[11px] text-muted-foreground font-sans">
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-blue-500/40 inline-block border border-blue-400/60" /> ход</span>
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-red-600/40 inline-block border border-red-400/70" /> атака</span>
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-gold/30 inline-block border border-gold/60" /> удар героя</span>
-        <span className="flex items-center gap-1"><Icon name="Lock" size={10} className="text-orange-400" /> стрелок заблокирован</span>
+        <span className="flex items-center gap-1"><Icon name="Lock" size={10} className="text-orange-400" /> блокирован</span>
+        <span className="flex items-center gap-1"><span className="text-yellow-300 text-xs">⚡</span> доп. ход (мораль)</span>
       </div>
     </div>
   );
 };
 
 const ActionPanel = ({
-  active, hero, heroMode, phase, onToggleHero, onDefend, onActivate,
+  active, hero, heroMode, phase, onToggleHero, onDefend, onWait, onActivate,
 }: {
   active: Stack; hero: Hero; heroMode: boolean; phase: Phase;
-  onToggleHero: () => void; onDefend: () => void; onActivate: () => void;
+  onToggleHero: () => void; onDefend: () => void; onWait: () => void; onActivate: () => void;
 }) => {
   const color = active.side === 'haven' ? 'haven' : 'necro';
+  const isUndead = active.type.morale === 0;
   const hint =
     heroMode ? 'Режим героя: кликните вражеский отряд (−2 маны)'
-    : phase === 'select' ? `Кликните на ${active.type.icon} ${active.type.name}, чтобы начать ход`
-    : active.type.ranged ? 'Кликните по врагу (🔴) для стрельбы, или по синей клетке для перехода'
-    : 'Кликните по синей клетке для хода, или по красной — для атаки';
+    : phase === 'select' ? `Кликните на ${active.type.icon} чтобы открыть ход, или выберите действие`
+    : active.type.ranged ? 'Кликните по врагу (🔴) для стрельбы или по синей клетке'
+    : 'Синяя клетка — ход, красная — атака вплотную';
 
   return (
     <div className="parchment rounded-xl border border-border p-4 animate-fade-in">
@@ -411,17 +483,31 @@ const ActionPanel = ({
           <span className="text-2xl">{active.type.icon}</span>
           <div>
             <p className={`font-display text-${color} text-lg leading-tight`}>{active.type.name}</p>
-            <p className="font-sans text-xs text-muted-foreground">
-              {FACTION_LABEL[active.side]} · {active.count} шт · АТК {active.type.atk} / ЗАЩ {active.type.def}
-              {active.type.ranged ? ' · 🏹' : ' · ⚔️'}
-            </p>
+            <div className="flex items-center gap-2 flex-wrap mt-0.5">
+              <span className="font-sans text-xs text-muted-foreground">
+                {FACTION_LABEL[active.side]} · {active.count} шт · ⚔️{active.type.atk} 🛡️{active.type.def}
+                · {active.type.minDmg}–{active.type.maxDmg} урона
+                {active.type.ranged ? ' · 🏹' : ''}
+              </span>
+              {!isUndead && (
+                <span className="flex items-center gap-1 text-[11px]">
+                  <span className={active.morale > 0 ? 'text-yellow-400' : active.morale < 0 ? 'text-red-400' : 'text-muted-foreground'}>
+                    Мораль {active.morale > 0 ? `+${active.morale}` : active.morale}
+                  </span>
+                  <span className={active.luck > 0 ? 'text-green-400' : active.luck < 0 ? 'text-red-400' : 'text-muted-foreground'}>
+                    · Удача {active.luck > 0 ? `+${active.luck}` : active.luck}
+                  </span>
+                </span>
+              )}
+              {isUndead && <span className="text-[11px] text-muted-foreground">☠️ Нежить · иммун к морали</span>}
+            </div>
           </div>
         </div>
         <div className="flex gap-2 flex-wrap">
           {phase === 'select' && !heroMode && (
             <button onClick={onActivate}
               className={`font-serif text-sm px-4 py-2 rounded-lg border border-${color}/50 text-${color} hover:bg-${color}/10 transition`}>
-              Выбрать отряд
+              Выбрать
             </button>
           )}
           <button onClick={onToggleHero} disabled={hero.mana < 2}
@@ -432,6 +518,10 @@ const ActionPanel = ({
           <button onClick={onDefend}
             className="font-serif text-sm px-4 py-2 rounded-lg border border-border hover:bg-secondary transition">
             🛡️ Защита
+          </button>
+          <button onClick={onWait}
+            className="font-serif text-sm px-4 py-2 rounded-lg border border-border hover:bg-secondary transition">
+            ⏳ Ждать
           </button>
         </div>
       </div>
@@ -475,7 +565,11 @@ const BattleLog = ({ log }: { log: LogEntry[] }) => (
     <div className="space-y-1.5">
       {log.map((e, i) => (
         <p key={i} className={`font-sans text-xs leading-snug
-          ${e.tone === 'haven' ? 'text-haven' : e.tone === 'necro' ? 'text-necro' : 'text-muted-foreground'}`}>
+          ${e.tone === 'haven' ? 'text-haven'
+          : e.tone === 'necro' ? 'text-necro'
+          : e.tone === 'luck' ? 'text-green-400'
+          : e.tone === 'morale' ? 'text-yellow-400'
+          : 'text-muted-foreground'}`}>
           {e.text}
         </p>
       ))}
